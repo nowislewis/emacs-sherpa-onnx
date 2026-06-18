@@ -7,13 +7,13 @@
 
 ;;; Generated autoloads from emacs-sherpa.el
 
-(autoload 'emacs-sherpa-start "emacs-sherpa"
+(autoload 'emacs-sherpa-start-daemon "emacs-sherpa"
 "Start the resident ASR daemon (loads the model once; takes a few seconds)." t)
-(autoload 'emacs-sherpa-stop "emacs-sherpa"
+(autoload 'emacs-sherpa-stop-daemon "emacs-sherpa"
 "Stop the resident ASR daemon." t)
-(autoload 'emacs-sherpa-run "emacs-sherpa"
+(autoload 'emacs-sherpa-dictate "emacs-sherpa"
 "Toggle recording: start recording the mic, or stop and transcribe." t)
-(autoload 'emacs-sherpa-run-file "emacs-sherpa"
+(autoload 'emacs-sherpa-dictate-file "emacs-sherpa"
 "Transcribe an existing WAV FILE via the daemon, insert text at point.
 
 (fn FILE)" t)

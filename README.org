@@ -11,12 +11,12 @@ A resident daemon loads the model once and stays in memory, so each
 transcription is fast:
 
 #+begin_example
-  emacs-sherpa-start   ->  launch daemon, load model once
-  emacs-sherpa-run     ->  record mic -> insert text (press again to stop)
-  emacs-sherpa-stop    ->  shut the daemon down
+  emacs-sherpa-start-daemon  ->  launch daemon, load model once
+  emacs-sherpa-dictate       ->  record mic -> insert text (press again to stop)
+  emacs-sherpa-stop-daemon   ->  shut the daemon down
 #+end_example
 
-=emacs-sherpa-run= auto-starts the daemon on first use. Only the
+=emacs-sherpa-dictate= auto-starts the daemon on first use. Only the
 =sherpa-onnx= Python package is required.
 
 * Requirements
@@ -33,19 +33,19 @@ make test         # transcribe a bundled test wav
 #+begin_src emacs-lisp
 (add-to-list 'load-path "~/Downloads/emacs-sherpa-onnx")
 (require 'emacs-sherpa)
-(global-set-key (kbd "C-c d") #'emacs-sherpa-run)
+(global-set-key (kbd "C-c d") #'emacs-sherpa-dictate)
 #+end_src
 
 * Commands
 
-| Command                     | Description                            |
-|-----------------------------+----------------------------------------|
-| =emacs-sherpa-start=        | Launch the daemon (loads model once)   |
-| =emacs-sherpa-stop=         | Shut the daemon down                   |
-| =emacs-sherpa-run=          | Toggle record mic / stop + insert text |
-| =emacs-sherpa-run-file=     | Transcribe an existing WAV at point    |
-| =emacs-sherpa-cancel=       | Cancel an in-progress recording        |
-| =emacs-sherpa-reset-python= | Re-detect the Python interpreter       |
+| Command                      | Description                            |
+|------------------------------+----------------------------------------|
+| =emacs-sherpa-start-daemon=  | Launch the daemon (loads model once)   |
+| =emacs-sherpa-stop-daemon=   | Shut the daemon down                   |
+| =emacs-sherpa-dictate=       | Toggle record mic / stop + insert text |
+| =emacs-sherpa-dictate-file=  | Transcribe an existing WAV at point    |
+| =emacs-sherpa-cancel=        | Cancel an in-progress recording        |
+| =emacs-sherpa-reset-python=  | Re-detect the Python interpreter       |
 
 * Customization
 

@@ -22,7 +22,7 @@ install: venv model
 	@echo "Done. Emacs config:"
 	@echo "  (add-to-list 'load-path \"$(CURDIR)\")"
 	@echo "  (require 'emacs-sherpa)"
-	@echo "  (global-set-key (kbd \"C-c d\") #'emacs-sherpa-run)"
+	@echo "  (global-set-key (kbd \"C-c d\") #'emacs-sherpa-dictate)"
 
 venv:
 	@command -v uv >/dev/null 2>&1 || { echo "error: uv not found (https://docs.astral.sh/uv/)"; exit 1; }

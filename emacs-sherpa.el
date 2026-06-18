@@ -5,14 +5,14 @@
 ;; once, then each recording is transcribed quickly with no reload cost.
 ;;
 ;; Three commands:
-;;   emacs-sherpa-start  -- launch the daemon (loads the model once)
-;;   emacs-sherpa-stop   -- shut the daemon down
-;;   emacs-sherpa-run    -- record the mic, transcribe, insert text at point
+;;   emacs-sherpa-start-daemon  -- launch the daemon (loads the model once)
+;;   emacs-sherpa-stop-daemon   -- shut the daemon down
+;;   emacs-sherpa-dictate       -- record the mic, transcribe, insert text
 
 ;;; Usage:
 ;;   (require 'emacs-sherpa)        ;; after adding this dir to load-path
-;;   (global-set-key (kbd "C-c d") #'emacs-sherpa-run)
-;;   ;; emacs-sherpa-run auto-starts the daemon on first use.
+;;   (global-set-key (kbd "C-c d") #'emacs-sherpa-dictate)
+;;   ;; emacs-sherpa-dictate auto-starts the daemon on first use.
 
 ;;; Code:
 
@@ -113,7 +113,7 @@ TARGET is a cons (BUFFER . POINT-MARKER).")
           emacs-sherpa--pending nil)))
 
 ;;;###autoload
-(defun emacs-sherpa-start ()
+(defun emacs-sherpa-start-daemon ()
   "Start the resident ASR daemon (loads the model once; takes a few seconds)."
   (interactive)
   (if (emacs-sherpa--daemon-live-p)
@@ -132,7 +132,7 @@ TARGET is a cons (BUFFER . POINT-MARKER).")
     (message "sherpa: starting daemon (loading model)…")))
 
 ;;;###autoload
-(defun emacs-sherpa-stop ()
+(defun emacs-sherpa-stop-daemon ()
   "Stop the resident ASR daemon."
   (interactive)
   (when (emacs-sherpa--daemon-live-p)
@@ -165,15 +165,15 @@ TARGET is a cons (BUFFER . POINT-MARKER).")
     (if (emacs-sherpa--daemon-live-p)
         (progn (message "sherpa: transcribing…")
                (emacs-sherpa--submit wav target))
-      (message "sherpa: daemon not running (run emacs-sherpa-start)"))))
+      (message "sherpa: daemon not running (run emacs-sherpa-start-daemon)"))))
 
 ;;;###autoload
-(defun emacs-sherpa-run ()
+(defun emacs-sherpa-dictate ()
   "Toggle recording: start recording the mic, or stop and transcribe.
 Auto-starts the daemon if it is not already running."
   (interactive)
   (unless (emacs-sherpa--daemon-live-p)
-    (emacs-sherpa-start))
+    (emacs-sherpa-start-daemon))
   (if (process-live-p emacs-sherpa--rec-proc)
       ;; second press: stop recording -> transcribe
       (progn
@@ -195,21 +195,21 @@ Auto-starts the daemon if it is not already running."
            :buffer (get-buffer-create "*emacs-sherpa-rec*")
            :sentinel
            (lambda (_p _e) (emacs-sherpa--on-record-finished))))
-    (message "sherpa: recording… (run emacs-sherpa-run again to stop)")))
+    (message "sherpa: recording… (run emacs-sherpa-dictate again to stop)")))
 
 ;;;###autoload
-(defun emacs-sherpa-run-file (file)
+(defun emacs-sherpa-dictate-file (file)
   "Transcribe an existing WAV FILE via the daemon, insert text at point.
 Auto-starts the daemon if needed."
   (interactive "fWAV file: ")
   (unless (emacs-sherpa--daemon-live-p)
-    (emacs-sherpa-start))
+    (emacs-sherpa-start-daemon))
   (if (emacs-sherpa--daemon-live-p)
       (progn
         (message "sherpa: transcribing %s…" (file-name-nondirectory file))
         (emacs-sherpa--submit (expand-file-name file)
                               (cons (current-buffer) (point-marker))))
-    (message "sherpa: daemon not running (run emacs-sherpa-start)")))
+    (message "sherpa: daemon not running (run emacs-sherpa-start-daemon)")))
 
 ;;;###autoload
 (defun emacs-sherpa-cancel ()
@@ -225,7 +225,7 @@ Auto-starts the daemon if needed."
 
 (defvar emacs-sherpa-map
   (let ((m (make-sparse-keymap)))
-    (define-key m (kbd "C-c d") #'emacs-sherpa-run)
+    (define-key m (kbd "C-c d") #'emacs-sherpa-dictate)
     (define-key m (kbd "C-c D") #'emacs-sherpa-cancel)
     m)
   "Suggested keymap; not bound by default.")
