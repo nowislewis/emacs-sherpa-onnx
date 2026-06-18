@@ -1,0 +1,67 @@
+#+title: emacs-sherpa-onnx
+#+language: en
+
+Dictate text into Emacs with [[https://github.com/k2-fsa/sherpa-onnx][sherpa-onnx]] running [[https://github.com/QwenLM/Qwen3-ASR][Qwen3-ASR]] (0.6B
+int8) — a multilingual ASR model (Chinese, English, Cantonese,
+Japanese, Korean, 20+ Chinese dialects). Runs on CPU, offline, no
+server. A self-contained Python script (=asr-sherpa=) plus a thin
+Emacs front-end (=emacs-sherpa.el=).
+
+A resident daemon loads the model once and stays in memory, so each
+transcription is fast:
+
+#+begin_example
+  emacs-sherpa-start   ->  launch daemon, load model once
+  emacs-sherpa-run     ->  record mic -> insert text (press again to stop)
+  emacs-sherpa-stop    ->  shut the daemon down
+#+end_example
+
+=emacs-sherpa-run= auto-starts the daemon on first use. Only the
+=sherpa-onnx= Python package is required.
+
+* Requirements
+
+- [[https://docs.astral.sh/uv/][uv]], =ffmpeg=, ~1 GB disk for the model
+
+* Quick start
+
+#+begin_src shell
+make install      # venv + sherpa-onnx + download Qwen3-ASR (~840 MB)
+make test         # transcribe a bundled test wav
+#+end_src
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "~/Downloads/emacs-sherpa-onnx")
+(require 'emacs-sherpa)
+(global-set-key (kbd "C-c d") #'emacs-sherpa-run)
+#+end_src
+
+* Commands
+
+| Command                     | Description                            |
+|-----------------------------+----------------------------------------|
+| =emacs-sherpa-start=        | Launch the daemon (loads model once)   |
+| =emacs-sherpa-stop=         | Shut the daemon down                   |
+| =emacs-sherpa-run=          | Toggle record mic / stop + insert text |
+| =emacs-sherpa-run-file=     | Transcribe an existing WAV at point    |
+| =emacs-sherpa-cancel=       | Cancel an in-progress recording        |
+| =emacs-sherpa-reset-python= | Re-detect the Python interpreter       |
+
+* Customization
+
+| Variable                           | Default   | Description             |
+|------------------------------------+-----------+-------------------------|
+| =emacs-sherpa-python=              | auto      | Python with sherpa-onnx |
+| =emacs-sherpa-ffmpeg-input-format= | =pulse=   | ffmpeg input format     |
+| =emacs-sherpa-ffmpeg-input-device= | =default= | ffmpeg input device     |
+
+* CLI
+
+#+begin_src shell
+asr-sherpa audio.wav      # one-shot: print text
+asr-sherpa < audio.wav    # one-shot: read WAV from stdin
+asr-sherpa --serve        # daemon: one wav path per line -> one text line
+#+end_src
+
+The WAV must be 16-bit PCM (16 kHz mono ideal). The model lives in
+=models/= next to the script, so the repo is self-contained.

@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""asr-sherpa: transcribe a WAV file to text via sherpa-onnx Qwen3-ASR.
+
+Self-contained: the ONNX model lives in ./models/ next to this script,
+and only the `sherpa-onnx` package is required (no numpy / torch / soundfile).
+
+Usage:
+  asr-sherpa audio.wav            # one-shot: print recognized text
+  asr-sherpa < audio.wav          # one-shot: read WAV from stdin
+  asr-sherpa --serve              # resident daemon: read a wav path per line
+                                  # on stdin, print one line of text per file.
+                                  # The model is loaded once and reused.
+  asr-sherpa --model DIR a.wav    # use a different Qwen3-ASR model directory
+
+The WAV must be 16-bit PCM. Any sample rate / channel count is accepted;
+multi-channel audio is downmixed to mono. (16 kHz mono is ideal.)
+"""
+import os
+import sys
+import glob
+import wave
+import array
+import argparse
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(HERE, "models")
+
+
+def default_model():
+    """Pick the Qwen3-ASR model directory under models/."""
+    hits = sorted(glob.glob(os.path.join(MODELS_DIR, "*qwen3*")))
+    hits = [d for d in hits if os.path.isdir(d)]
+    if not hits:
+        sys.exit(f"asr-sherpa: no Qwen3-ASR model under {MODELS_DIR}; "
+                 f"run `make install`.")
+    return hits[0]
+
+
+def read_wave(path_or_fileobj):
+    """Read a 16-bit PCM WAV, return (sample_rate, mono float samples)."""
+    wf = wave.open(path_or_fileobj, "rb")
+    try:
+        sr = wf.getframerate()
+        ch = wf.getnchannels()
+        sw = wf.getsampwidth()
+        if sw != 2:
+            sys.exit(f"asr-sherpa: need 16-bit PCM WAV, got sample width {sw}")
+        raw = wf.readframes(wf.getnframes())
+    finally:
+        wf.close()
+    a = array.array("h")
+    a.frombytes(raw)
+    if ch > 1:
+        a = a[::ch]  # take first channel (cheap downmix)
+    inv = 1.0 / 32768.0
+    return sr, [s * inv for s in a]
+
+
+def build_recognizer(model_dir, threads):
+    import sherpa_onnx
+    conv = os.path.join(model_dir, "conv_frontend.onnx")
+    enc = os.path.join(model_dir, "encoder.int8.onnx")
+    dec = os.path.join(model_dir, "decoder.int8.onnx")
+    tok = os.path.join(model_dir, "tokenizer")
+    for f in (conv, enc, dec, tok):
+        if not os.path.exists(f):
+            sys.exit(f"asr-sherpa: missing model file: {f}\n"
+                     f"Run `make install` in the repo.")
+    return sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
+        conv_frontend=conv, encoder=enc, decoder=dec,
+        tokenizer=tok, num_threads=threads, debug=False)
+
+
+def transcribe(rec, wav):
+    sr, samples = read_wave(wav)
+    if not samples:
+        return ""
+    s = rec.create_stream()
+    s.accept_waveform(sr, samples)
+    rec.decode_stream(s)
+    return s.result.text.strip()
+
+
+def serve(rec):
+    """Resident mode: one wav path per input line -> one text line out.
+    Signal readiness so the caller knows the model has finished loading."""
+    sys.stdout.write("READY\n")
+    sys.stdout.flush()
+    for line in sys.stdin:
+        wav = line.strip()
+        if not wav:
+            continue
+        if wav in ("quit", "exit"):
+            break
+        try:
+            text = transcribe(rec, wav)
+        except Exception as exc:
+            text = f"[error] {exc}"
+        # Always emit exactly one line so the caller can sync on it.
+        sys.stdout.write(text.replace("\n", " ") + "\n")
+        sys.stdout.flush()
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model", default=None,
+                   help="Qwen3-ASR model directory (default: bundled)")
+    p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--serve", action="store_true",
+                   help="resident daemon mode (wav path per stdin line)")
+    p.add_argument("wav", nargs="?", default=None,
+                   help="WAV file; reads stdin if omitted")
+    args = p.parse_args()
+
+    rec = build_recognizer(args.model or default_model(), args.threads)
+
+    if args.serve:
+        serve(rec)
+        return
+
+    wav = args.wav if args.wav else sys.stdin.buffer
+    text = transcribe(rec, wav)
+    if text:
+        sys.stdout.write(text + "\n")
+
+
+if __name__ == "__main__":
+    main()
