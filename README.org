@@ -7,8 +7,10 @@ Chinese dialects (普通话、粤语、四川话、上海话、闽南语等). Ru
 offline, no server. Short audio (≤30 s, i.e. ordinary dictation) is fed
 to the model whole — most reliable, never drops weak or short speech.
 Long audio is split into utterances with a VAD (silero) so recordings
-of any length work with bounded memory. A self-contained Python script
-(=asr-sherpa=) plus a thin Emacs front-end (=emacs-sherpa.el=).
+of any length work with bounded memory. A CT-Transformer model restores
+punctuation and breaks the result into one sentence per line. A
+self-contained Python script (=asr-sherpa=) plus a thin Emacs front-end
+(=emacs-sherpa.el=).
 
 A resident daemon loads the model once and stays in memory, so each
 transcription is fast:
@@ -75,3 +77,8 @@ live in =models/= next to the script, so the repo is self-contained.
 The whole-vs-VAD cutoff defaults to 30 s; override with the
 =ASR_VAD_THRESHOLD_SEC= environment variable (set it huge to always
 transcribe whole, or 0 to always use the VAD).
+
+Punctuation is optional: if the CT-Transformer model is present it is
+applied automatically (and the text is split one sentence per line);
+otherwise raw unpunctuated text is returned. In =--serve= mode the
+newlines are flattened to spaces so each reply stays on one line.

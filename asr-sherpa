@@ -29,12 +29,21 @@ import argparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(HERE, "models")
 VAD_MODEL = os.path.join(MODELS_DIR, "silero_vad.onnx")
+PUNCT_DIR = os.path.join(
+    MODELS_DIR,
+    "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8")
+PUNCT_MODEL = os.path.join(PUNCT_DIR, "model.int8.onnx")
 SAMPLE_RATE = 16000
 
 # Audio at or below this many seconds is fed to the model in one shot (more
 # reliable for short dictation -- no VAD can drop weak/short speech). Longer
 # audio is split with the VAD to keep memory bounded.
 VAD_THRESHOLD_SEC = float(os.environ.get("ASR_VAD_THRESHOLD_SEC", "30"))
+
+# Neural-net threads. Defaults to CPU count minus one (leave a core free;
+# override with --threads or the ASR_THREADS env var).
+DEFAULT_THREADS = int(os.environ.get(
+    "ASR_THREADS", max(1, (os.cpu_count() or 2) - 1)))
 
 
 def default_model():
@@ -77,6 +86,40 @@ def build_recognizer(model_dir, threads):
                      f"Run `make install` in the repo.")
     return sherpa_onnx.OfflineRecognizer.from_fire_red_asr_ctc(
         model=model, tokens=tokens, num_threads=threads, debug=False)
+
+
+def build_punct(threads):
+    """Build the CT-Transformer punctuation model, or None if not present.
+    Punctuation is optional: without it, raw unpunctuated text is returned."""
+    if not os.path.exists(PUNCT_MODEL):
+        return None
+    import sherpa_onnx
+    config = sherpa_onnx.OfflinePunctuationConfig(
+        model=sherpa_onnx.OfflinePunctuationModelConfig(
+            ct_transformer=PUNCT_MODEL, num_threads=threads))
+    return sherpa_onnx.OfflinePunctuation(config)
+
+
+def punctuate(punct, text):
+    """Add punctuation to TEXT and break it into one sentence per line.
+    Long text is chunked (on utterance boundaries) so the CT-Transformer is
+    never overloaded; original spacing inside chunks is preserved."""
+    if not punct or not text:
+        return text
+    # Chunk on utterance joins (" ") but keep each chunk's own spacing intact.
+    out, chunk = [], ""
+    for utt in text.split(" "):
+        chunk = (chunk + " " + utt) if chunk else utt
+        if len(chunk) >= 200:
+            out.append(punct.add_punctuation(chunk))
+            chunk = ""
+    if chunk:
+        out.append(punct.add_punctuation(chunk))
+    joined = " ".join(out)
+    # One sentence per line: break after Chinese/ASCII sentence enders.
+    for ch in "。！？":
+        joined = joined.replace(ch, ch + "\n")
+    return "\n".join(line.strip() for line in joined.split("\n") if line.strip())
 
 
 def build_vad(threads):
@@ -136,18 +179,21 @@ def decode_with_vad(rec, vad, samples):
     return " ".join(texts)
 
 
-def transcribe(rec, vad, wav):
-    """Transcribe WAV: whole for short audio, VAD-segmented for long audio."""
+def transcribe(rec, vad, punct, wav):
+    """Transcribe WAV: whole for short audio, VAD-segmented for long audio.
+    Then restore punctuation and split into one sentence per line."""
     sr, samples = read_wave(wav)
     if not samples:
         return ""
     samples = resample(samples, sr)
     if len(samples) <= VAD_THRESHOLD_SEC * SAMPLE_RATE:
-        return decode_whole(rec, samples)
-    return decode_with_vad(rec, vad, samples)
+        text = decode_whole(rec, samples)
+    else:
+        text = decode_with_vad(rec, vad, samples)
+    return punctuate(punct, text)
 
 
-def serve(rec, vad):
+def serve(rec, vad, punct):
     """Resident mode: one wav path per input line -> one text line out.
     Signal readiness so the caller knows the model has finished loading."""
     sys.stdout.write("READY\n")
@@ -159,7 +205,7 @@ def serve(rec, vad):
         if wav in ("quit", "exit"):
             break
         try:
-            text = transcribe(rec, vad, wav)
+            text = transcribe(rec, vad, punct, wav)
         except Exception as exc:
             text = f"[error] {exc}"
         # Always emit exactly one line so the caller can sync on it.
@@ -171,7 +217,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=None,
                    help="FireRedASR2-CTC model directory (default: bundled)")
-    p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--threads", type=int, default=DEFAULT_THREADS)
     p.add_argument("--serve", action="store_true",
                    help="resident daemon mode (wav path per stdin line)")
     p.add_argument("wav", nargs="?", default=None,
@@ -180,13 +226,14 @@ def main():
 
     rec = build_recognizer(args.model or default_model(), args.threads)
     vad = build_vad(args.threads)
+    punct = build_punct(args.threads)
 
     if args.serve:
-        serve(rec, vad)
+        serve(rec, vad, punct)
         return
 
     wav = args.wav if args.wav else sys.stdin.buffer
-    text = transcribe(rec, vad, wav)
+    text = transcribe(rec, vad, punct, wav)
     if text:
         sys.stdout.write(text + "\n")
 
