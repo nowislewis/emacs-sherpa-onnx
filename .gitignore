@@ -7,6 +7,9 @@ models/
 # Compiled Emacs Lisp
 *.elc
 
+# Generated autoloads
+*-autoloads.el
+
 # Temp / recordings
 *.wav
 *~
