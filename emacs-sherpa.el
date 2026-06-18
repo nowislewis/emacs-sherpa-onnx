@@ -64,11 +64,13 @@ The first that can import sherpa_onnx wins."
   :type 'string :group 'emacs-sherpa)
 
 (defun emacs-sherpa--installed-p ()
-  "Return non-nil if sherpa-onnx is importable and a model is present."
+  "Return non-nil if sherpa-onnx, the model and the VAD are all present."
   (and (emacs-sherpa--has-module-p (emacs-sherpa--python))
        (file-expand-wildcards
-        (expand-file-name "models/*qwen3*/encoder.int8.onnx"
-                          emacs-sherpa-directory))))
+        (expand-file-name "models/*fire-red-asr2-ctc*/model.int8.onnx"
+                          emacs-sherpa-directory))
+       (file-exists-p
+        (expand-file-name "models/silero_vad.onnx" emacs-sherpa-directory))))
 
 (defun emacs-sherpa-install (&optional callback)
   "Run `make install' in `emacs-sherpa-directory' (venv + package + model).
