@@ -16,8 +16,9 @@ transcription is fast:
   emacs-sherpa-stop-daemon   ->  shut the daemon down
 #+end_example
 
-=emacs-sherpa-dictate= auto-starts the daemon on first use. Only the
-=sherpa-onnx= Python package is required.
+On first use =emacs-sherpa-dictate= offers to install sherpa-onnx (via
+=make install=) and to start the daemon, so you can drive everything
+from Emacs. Only the =sherpa-onnx= Python package is required.
 
 * Requirements
 
@@ -40,6 +41,7 @@ make test         # transcribe a bundled test wav
 
 | Command                      | Description                            |
 |------------------------------+----------------------------------------|
+| =emacs-sherpa-install=       | Install sherpa-onnx + model (make)     |
 | =emacs-sherpa-start-daemon=  | Launch the daemon (loads model once)   |
 | =emacs-sherpa-stop-daemon=   | Shut the daemon down                   |
 | =emacs-sherpa-dictate=       | Toggle record mic / stop + insert text |

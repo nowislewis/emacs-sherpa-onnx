@@ -55,9 +55,44 @@ The first that can import sherpa_onnx wins."
   (setq emacs-sherpa--python-cache nil)
   (message "sherpa python: %s" (emacs-sherpa--python)))
 
+;; ---------------------------------------------------------------------------
+;; Installation (sherpa-onnx package + model)
+;; ---------------------------------------------------------------------------
+(defcustom emacs-sherpa-directory
+  (file-name-directory (or load-file-name buffer-file-name ""))
+  "Repository directory (holds the Makefile, asr-sherpa script and models/)."
+  :type 'string :group 'emacs-sherpa)
+
+(defun emacs-sherpa--installed-p ()
+  "Return non-nil if sherpa-onnx is importable and a model is present."
+  (and (emacs-sherpa--has-module-p (emacs-sherpa--python))
+       (file-expand-wildcards
+        (expand-file-name "models/*qwen3*/encoder.int8.onnx"
+                          emacs-sherpa-directory))))
+
+(defun emacs-sherpa-install (&optional callback)
+  "Run `make install' in `emacs-sherpa-directory' (venv + package + model).
+Call CALLBACK with no args once installation succeeds."
+  (interactive)
+  (let ((default-directory emacs-sherpa-directory))
+    (message "sherpa: installing (make install)… see *emacs-sherpa-install*")
+    (make-process
+     :name "emacs-sherpa-install"
+     :command (list "make" "install")
+     :buffer (get-buffer-create "*emacs-sherpa-install*")
+     :noquery t
+     :sentinel
+     (lambda (proc _event)
+       (when (memq (process-status proc) '(exit signal))
+         (setq emacs-sherpa--python-cache nil)
+         (if (eq 0 (process-exit-status proc))
+             (progn (message "sherpa: install finished")
+                    (when callback (funcall callback)))
+           (message "sherpa: install failed (see *emacs-sherpa-install*)")
+           (display-buffer "*emacs-sherpa-install*")))))))
+
 (defcustom emacs-sherpa-script
-  (expand-file-name "asr-sherpa"
-                    (file-name-directory (or load-file-name buffer-file-name "")))
+  (expand-file-name "asr-sherpa" emacs-sherpa-directory)
   "Path to the asr-sherpa script."
   :type 'string :group 'emacs-sherpa)
 
@@ -131,6 +166,19 @@ TARGET is a cons (BUFFER . POINT-MARKER).")
            :sentinel #'emacs-sherpa--sentinel))
     (message "sherpa: starting daemon (loading model)…")))
 
+(defun emacs-sherpa--ensure-ready (then)
+  "Make sure things are usable, then call THEN.
+If sherpa-onnx is not installed, ask to run `make install' (THEN runs after).
+If the daemon is not running, ask to start it."
+  (cond
+   ((not (emacs-sherpa--installed-p))
+    (when (y-or-n-p "sherpa-onnx not installed.  Run `make install' now? ")
+      (emacs-sherpa-install (lambda () (emacs-sherpa-start-daemon) (funcall then)))))
+   ((emacs-sherpa--daemon-live-p) (funcall then))
+   ((y-or-n-p "sherpa daemon not running.  Start it now? ")
+    (emacs-sherpa-start-daemon)
+    (funcall then))))
+
 ;;;###autoload
 (defun emacs-sherpa-stop-daemon ()
   "Stop the resident ASR daemon."
@@ -167,49 +215,46 @@ TARGET is a cons (BUFFER . POINT-MARKER).")
                (emacs-sherpa--submit wav target))
       (message "sherpa: daemon not running (run emacs-sherpa-start-daemon)"))))
 
+(defun emacs-sherpa--start-recording ()
+  "Begin capturing the mic; transcribe when stopped."
+  (setq emacs-sherpa--wav (make-temp-file "emacs-sherpa-" nil ".wav")
+        emacs-sherpa--target (cons (current-buffer) (point-marker))
+        emacs-sherpa--rec-proc
+        (make-process
+         :name "emacs-sherpa-rec"
+         :command (list emacs-sherpa-ffmpeg "-y"
+                        "-f" emacs-sherpa-ffmpeg-input-format
+                        "-i" emacs-sherpa-ffmpeg-input-device
+                        "-ar" "16000" "-ac" "1"
+                        "-loglevel" "quiet"
+                        emacs-sherpa--wav)
+         :connection-type 'pipe :noquery t
+         :buffer (get-buffer-create "*emacs-sherpa-rec*")
+         :sentinel (lambda (_p _e) (emacs-sherpa--on-record-finished))))
+  (message "sherpa: recording… (run emacs-sherpa-dictate again to stop)"))
+
 ;;;###autoload
 (defun emacs-sherpa-dictate ()
   "Toggle recording: start recording the mic, or stop and transcribe.
-Auto-starts the daemon if it is not already running."
+On first use, offers to install sherpa-onnx and start the daemon."
   (interactive)
-  (unless (emacs-sherpa--daemon-live-p)
-    (emacs-sherpa-start-daemon))
   (if (process-live-p emacs-sherpa--rec-proc)
-      ;; second press: stop recording -> transcribe
-      (progn
-        (interrupt-process emacs-sherpa--rec-proc) ; SIGINT lets ffmpeg flush wav
-        (setq emacs-sherpa--rec-proc nil))
-    ;; first press: start recording
-    (setq emacs-sherpa--wav (make-temp-file "emacs-sherpa-" nil ".wav")
-          emacs-sherpa--target (cons (current-buffer) (point-marker)))
-    (setq emacs-sherpa--rec-proc
-          (make-process
-           :name "emacs-sherpa-rec"
-           :command (list emacs-sherpa-ffmpeg "-y"
-                          "-f" emacs-sherpa-ffmpeg-input-format
-                          "-i" emacs-sherpa-ffmpeg-input-device
-                          "-ar" "16000" "-ac" "1"
-                          "-loglevel" "quiet"
-                          emacs-sherpa--wav)
-           :connection-type 'pipe :noquery t
-           :buffer (get-buffer-create "*emacs-sherpa-rec*")
-           :sentinel
-           (lambda (_p _e) (emacs-sherpa--on-record-finished))))
-    (message "sherpa: recording… (run emacs-sherpa-dictate again to stop)")))
+      ;; second press: stop recording -> transcribe (SIGINT lets ffmpeg flush)
+      (progn (interrupt-process emacs-sherpa--rec-proc)
+             (setq emacs-sherpa--rec-proc nil))
+    ;; first press: ensure things are ready, then start recording
+    (emacs-sherpa--ensure-ready #'emacs-sherpa--start-recording)))
 
 ;;;###autoload
 (defun emacs-sherpa-dictate-file (file)
   "Transcribe an existing WAV FILE via the daemon, insert text at point.
-Auto-starts the daemon if needed."
+On first use, offers to install sherpa-onnx and start the daemon."
   (interactive "fWAV file: ")
-  (unless (emacs-sherpa--daemon-live-p)
-    (emacs-sherpa-start-daemon))
-  (if (emacs-sherpa--daemon-live-p)
-      (progn
-        (message "sherpa: transcribing %s…" (file-name-nondirectory file))
-        (emacs-sherpa--submit (expand-file-name file)
-                              (cons (current-buffer) (point-marker))))
-    (message "sherpa: daemon not running (run emacs-sherpa-start-daemon)")))
+  (emacs-sherpa--ensure-ready
+   (lambda ()
+     (message "sherpa: transcribing %s…" (file-name-nondirectory file))
+     (emacs-sherpa--submit (expand-file-name file)
+                           (cons (current-buffer) (point-marker))))))
 
 ;;;###autoload
 (defun emacs-sherpa-cancel ()

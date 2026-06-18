@@ -7,6 +7,8 @@
 
 ;;; Generated autoloads from emacs-sherpa.el
 
+(autoload 'emacs-sherpa-install "emacs-sherpa"
+"Run `make install' (venv + package + model)." t)
 (autoload 'emacs-sherpa-start-daemon "emacs-sherpa"
 "Start the resident ASR daemon (loads the model once; takes a few seconds)." t)
 (autoload 'emacs-sherpa-stop-daemon "emacs-sherpa"
