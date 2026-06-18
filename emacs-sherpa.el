@@ -292,13 +292,17 @@ with a prefix argument, prompt for it instead."
       (message "sherpa: recording to %s… (run emacs-sherpa-only-record again to stop)"
                dest))))
 
-(defvar emacs-sherpa-map
-  (let ((m (make-sparse-keymap)))
-    (define-key m (kbd "C-c d") #'emacs-sherpa-dictate)
-    (define-key m (kbd "C-c D") #'emacs-sherpa-cancel)
-    (define-key m (kbd "C-c r") #'emacs-sherpa-only-record)
-    m)
-  "Suggested keymap; not bound by default.")
+;;;###autoload
+(defvar emacs-sherpa-map)
+;;;###autoload
+(define-prefix-command 'emacs-sherpa-map)
+(let ((m emacs-sherpa-map))
+  (define-key m (kbd "d") #'emacs-sherpa-dictate)
+  (define-key m (kbd "c") #'emacs-sherpa-cancel)
+  (define-key m (kbd "r") #'emacs-sherpa-only-record))
+;; `emacs-sherpa-map' is both a keymap and a prefix command, so binding a
+;; single key to it in a normal keymap enters it directly:
+;;   (define-key some-map (kbd "s") 'emacs-sherpa-map)  ; then d / c / r
 
 (provide 'emacs-sherpa)
 ;;; emacs-sherpa.el ends here

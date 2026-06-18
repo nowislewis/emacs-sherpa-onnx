@@ -45,6 +45,21 @@ make test         # transcribe a bundled test wav
 (add-to-list 'load-path "~/Downloads/emacs-sherpa-onnx")
 (require 'emacs-sherpa)
 (global-set-key (kbd "C-c d") #'emacs-sherpa-dictate)
+;; Or bind one key to the whole keymap (then press d / c / r):
+;;   (global-set-key (kbd "C-c s") 'emacs-sherpa-map)
+#+end_src
+
+=emacs-sherpa-map= binds =d= / =c= / =r= to dictate / cancel /
+only-record.  For a [[https://github.com/magit/transient][transient]] pop-up menu, wrap the commands in your
+own prefix (keeps this package transient-free):
+
+#+begin_src emacs-lisp
+(transient-define-prefix sherpa-transient ()
+  "sherpa-onnx ASR."
+  [("d" "dictate"     emacs-sherpa-dictate)
+   ("c" "cancel"      emacs-sherpa-cancel)
+   ("r" "only-record" emacs-sherpa-only-record)])
+;; then reference `sherpa-transient' from your leader, e.g. ("w" "sherpa" sherpa-transient)
 #+end_src
 
 * Commands
@@ -58,6 +73,7 @@ make test         # transcribe a bundled test wav
 | =emacs-sherpa-dictate-file=  | Transcribe an existing WAV at point    |
 | =emacs-sherpa-only-record=   | Toggle record mic -> save WAV (no ASR) |
 | =emacs-sherpa-cancel=        | Cancel an in-progress recording        |
+| =emacs-sherpa-map=           | Prefix keymap: d / c / r for the above |
 | =emacs-sherpa-reset-python=  | Re-detect the Python interpreter       |
 
 * Customization
