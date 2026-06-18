@@ -112,40 +112,31 @@ Call CALLBACK with no args once installation succeeds."
 ;; Resident daemon
 ;; ---------------------------------------------------------------------------
 (defvar emacs-sherpa--daemon nil "The resident asr-sherpa --serve process.")
-(defvar emacs-sherpa--ready nil "Non-nil once the daemon has loaded the model.")
 (defvar emacs-sherpa--pending nil
-  "Queue of (WAV . TARGET) jobs waiting for a daemon reply.
-TARGET is a cons (BUFFER . POINT-MARKER).")
+  "FIFO queue of (BUFFER MARKER TMP-WAV) jobs awaiting a daemon reply.
+TMP-WAV, when non-nil, is a temp file deleted once the reply arrives.")
 
 (defun emacs-sherpa--daemon-live-p ()
   (process-live-p emacs-sherpa--daemon))
 
 (defun emacs-sherpa--filter (_proc string)
-  "Handle output lines from the daemon: READY, then one text line per job."
+  "Handle daemon output: a READY banner, then one text line per queued job."
   (dolist (line (split-string string "\n" t))
-    (cond
-     ((string= line "READY")
-      (setq emacs-sherpa--ready t)
-      (message "sherpa: daemon ready"))
-     (t
-      (let ((job (pop emacs-sherpa--pending)))
-        (when job
-          (let* ((target (cdr job))
-                 (buf (car target))
-                 (pos (cdr target))
-                 (text (string-trim line)))
-            (if (string-prefix-p "[error]" text)
-                (message "sherpa: %s" text)
-              (when (and (> (length text) 0) (buffer-live-p buf))
-                (with-current-buffer buf
-                  (save-excursion (goto-char (marker-position pos))
-                                  (insert text)))
-                (message "sherpa: %s" text))))))))))
+    (if (string= line "READY")
+        (message "sherpa: daemon ready")
+      (pcase-let ((`(,buf ,marker ,tmp) (pop emacs-sherpa--pending))
+                  (text (string-trim line)))
+        (when tmp (ignore-errors (delete-file tmp)))
+        (when buf
+          (when (and (not (string-prefix-p "[error]" text))
+                     (> (length text) 0) (buffer-live-p buf))
+            (with-current-buffer buf
+              (save-excursion (goto-char marker) (insert text))))
+          (message "sherpa: %s" text))))))
 
 (defun emacs-sherpa--sentinel (_proc _event)
   (unless (emacs-sherpa--daemon-live-p)
-    (setq emacs-sherpa--ready nil
-          emacs-sherpa--pending nil)))
+    (setq emacs-sherpa--pending nil)))
 
 ;;;###autoload
 (defun emacs-sherpa-start-daemon ()
@@ -153,8 +144,7 @@ TARGET is a cons (BUFFER . POINT-MARKER).")
   (interactive)
   (if (emacs-sherpa--daemon-live-p)
       (message "sherpa: daemon already running")
-    (setq emacs-sherpa--ready nil
-          emacs-sherpa--pending nil
+    (setq emacs-sherpa--pending nil
           emacs-sherpa--daemon
           (make-process
            :name "emacs-sherpa-daemon"
@@ -189,7 +179,6 @@ If the daemon is not running, ask to start it."
   (when (emacs-sherpa--daemon-live-p)
     (delete-process emacs-sherpa--daemon))
   (setq emacs-sherpa--daemon nil
-        emacs-sherpa--ready nil
         emacs-sherpa--pending nil)
   (message "sherpa: daemon stopped"))
 
@@ -197,40 +186,34 @@ If the daemon is not running, ask to start it."
 ;; Recording
 ;; ---------------------------------------------------------------------------
 (defvar emacs-sherpa--rec-proc nil "Active ffmpeg recording process.")
-(defvar emacs-sherpa--wav nil "Temp wav file being recorded.")
-(defvar emacs-sherpa--target nil "Target (BUFFER . MARKER) for the result.")
+(defvar emacs-sherpa--wav nil "Temp wav file of the in-progress recording.")
 
-(defun emacs-sherpa--submit (wav target)
-  "Send WAV to the daemon, recording TARGET for the eventual insertion."
+(defun emacs-sherpa--submit (wav buffer marker tmp)
+  "Send WAV to the daemon; insert the reply at MARKER in BUFFER.
+TMP non-nil marks WAV as a temp file to delete once transcribed."
   (setq emacs-sherpa--pending
-        (append emacs-sherpa--pending (list (cons wav target))))
+        (append emacs-sherpa--pending (list (list buffer marker tmp))))
+  (message "sherpa: transcribing…")
   (process-send-string emacs-sherpa--daemon (concat wav "\n")))
 
-(defun emacs-sherpa--on-record-finished ()
-  "Called when ffmpeg has stopped: hand the wav to the daemon."
-  (let ((wav emacs-sherpa--wav)
-        (target emacs-sherpa--target))
-    (if (emacs-sherpa--daemon-live-p)
-        (progn (message "sherpa: transcribing…")
-               (emacs-sherpa--submit wav target))
-      (message "sherpa: daemon not running (run emacs-sherpa-start-daemon)"))))
-
 (defun emacs-sherpa--start-recording ()
-  "Begin capturing the mic; transcribe when stopped."
-  (setq emacs-sherpa--wav (make-temp-file "emacs-sherpa-" nil ".wav")
-        emacs-sherpa--target (cons (current-buffer) (point-marker))
-        emacs-sherpa--rec-proc
-        (make-process
-         :name "emacs-sherpa-rec"
-         :command (list emacs-sherpa-ffmpeg "-y"
-                        "-f" emacs-sherpa-ffmpeg-input-format
-                        "-i" emacs-sherpa-ffmpeg-input-device
-                        "-ar" "16000" "-ac" "1"
-                        "-loglevel" "quiet"
-                        emacs-sherpa--wav)
-         :connection-type 'pipe :noquery t
-         :buffer (get-buffer-create "*emacs-sherpa-rec*")
-         :sentinel (lambda (_p _e) (emacs-sherpa--on-record-finished))))
+  "Begin capturing the mic; transcribe into the current buffer when stopped."
+  (let ((wav (setq emacs-sherpa--wav (make-temp-file "emacs-sherpa-" nil ".wav")))
+        (buffer (current-buffer))
+        (marker (point-marker)))
+    (setq emacs-sherpa--rec-proc
+          (make-process
+           :name "emacs-sherpa-rec"
+           :command (list emacs-sherpa-ffmpeg "-y"
+                          "-f" emacs-sherpa-ffmpeg-input-format
+                          "-i" emacs-sherpa-ffmpeg-input-device
+                          "-ar" "16000" "-ac" "1"
+                          "-loglevel" "quiet"
+                          wav)
+           :connection-type 'pipe :noquery t
+           :buffer (get-buffer-create "*emacs-sherpa-rec*")
+           :sentinel (lambda (_p _e)
+                       (emacs-sherpa--submit wav buffer marker t)))))
   (message "sherpa: recording… (run emacs-sherpa-dictate again to stop)"))
 
 ;;;###autoload
@@ -252,9 +235,8 @@ On first use, offers to install sherpa-onnx and start the daemon."
   (interactive "fWAV file: ")
   (emacs-sherpa--ensure-ready
    (lambda ()
-     (message "sherpa: transcribing %s…" (file-name-nondirectory file))
      (emacs-sherpa--submit (expand-file-name file)
-                           (cons (current-buffer) (point-marker))))))
+                           (current-buffer) (point-marker) nil))))
 
 ;;;###autoload
 (defun emacs-sherpa-cancel ()
