@@ -31,6 +31,11 @@ MODELS_DIR = os.path.join(HERE, "models")
 VAD_MODEL = os.path.join(MODELS_DIR, "silero_vad.onnx")
 SAMPLE_RATE = 16000
 
+# Audio at or below this many seconds is fed to the model in one shot (more
+# reliable for short dictation -- no VAD can drop weak/short speech). Longer
+# audio is split with the VAD to keep memory bounded.
+VAD_THRESHOLD_SEC = float(os.environ.get("ASR_VAD_THRESHOLD_SEC", "30"))
+
 
 def default_model():
     """Pick the FireRedASR2-CTC model directory under models/."""
@@ -103,13 +108,16 @@ def resample(samples, sr):
     return out
 
 
-def transcribe(rec, vad, wav):
-    """VAD-segment the audio and transcribe each utterance, joined by spaces."""
-    sr, samples = read_wave(wav)
-    if not samples:
-        return ""
-    samples = resample(samples, sr)
+def decode_whole(rec, samples):
+    """Transcribe SAMPLES (16 kHz mono) in one shot."""
+    s = rec.create_stream()
+    s.accept_waveform(SAMPLE_RATE, samples)
+    rec.decode_stream(s)
+    return s.result.text.strip()
 
+
+def decode_with_vad(rec, vad, samples):
+    """Split SAMPLES into utterances with the VAD; transcribe and join them."""
     vad.reset()
     window = vad.config.silero_vad.window_size
     texts = []
@@ -121,14 +129,22 @@ def transcribe(rec, vad, wav):
             vad.flush()
         i += window
         while not vad.empty():
-            s = rec.create_stream()
-            s.accept_waveform(SAMPLE_RATE, vad.front.samples)
-            rec.decode_stream(s)
-            t = s.result.text.strip()
+            t = decode_whole(rec, vad.front.samples)
             if t:
                 texts.append(t)
             vad.pop()
     return " ".join(texts)
+
+
+def transcribe(rec, vad, wav):
+    """Transcribe WAV: whole for short audio, VAD-segmented for long audio."""
+    sr, samples = read_wave(wav)
+    if not samples:
+        return ""
+    samples = resample(samples, sr)
+    if len(samples) <= VAD_THRESHOLD_SEC * SAMPLE_RATE:
+        return decode_whole(rec, samples)
+    return decode_with_vad(rec, vad, samples)
 
 
 def serve(rec, vad):

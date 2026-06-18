@@ -4,9 +4,10 @@
 Dictate text into Emacs with [[https://github.com/k2-fsa/sherpa-onnx][sherpa-onnx]] running [[https://github.com/FireRedTeam/FireRedASR2-AED][FireRedASR2]] (CTC,
 int8) — a high-accuracy ASR model for Chinese and English with 20+
 Chinese dialects (普通话、粤语、四川话、上海话、闽南语等). Runs on CPU,
-offline, no server. Long audio is split into utterances with a VAD
-(silero) and transcribed segment by segment, so recordings of any
-length work with bounded memory. A self-contained Python script
+offline, no server. Short audio (≤30 s, i.e. ordinary dictation) is fed
+to the model whole — most reliable, never drops weak or short speech.
+Long audio is split into utterances with a VAD (silero) so recordings
+of any length work with bounded memory. A self-contained Python script
 (=asr-sherpa=) plus a thin Emacs front-end (=emacs-sherpa.el=).
 
 A resident daemon loads the model once and stays in memory, so each
@@ -70,3 +71,7 @@ asr-sherpa --serve        # daemon: one wav path per line -> one text line
 The WAV must be 16-bit PCM; any sample rate / channel count is accepted
 (downmixed to mono, resampled to 16 kHz). The model and =silero_vad.onnx=
 live in =models/= next to the script, so the repo is self-contained.
+
+The whole-vs-VAD cutoff defaults to 30 s; override with the
+=ASR_VAD_THRESHOLD_SEC= environment variable (set it huge to always
+transcribe whole, or 0 to always use the VAD).
