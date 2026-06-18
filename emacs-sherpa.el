@@ -110,6 +110,12 @@ Call CALLBACK with no args once installation succeeds."
   "ffmpeg input device for `emacs-sherpa-ffmpeg-input-format'."
   :type 'string :group 'emacs-sherpa)
 
+(defcustom emacs-sherpa-recordings-directory
+  (or (getenv "XDG_DOWNLOAD_DIR")
+      (expand-file-name "Downloads" "~"))
+  "Directory where `emacs-sherpa-only-record' saves timestamped WAV files."
+  :type 'directory :group 'emacs-sherpa)
+
 ;; ---------------------------------------------------------------------------
 ;; Resident daemon
 ;; ---------------------------------------------------------------------------
@@ -198,24 +204,30 @@ TMP non-nil marks WAV as a temp file to delete once transcribed."
   (message "sherpa: transcribing…")
   (process-send-string emacs-sherpa--daemon (concat wav "\n")))
 
+(defun emacs-sherpa--ffmpeg-record (file sentinel)
+  "Start ffmpeg capturing the mic into FILE; call SENTINEL when it ends.
+Return the process."
+  (make-directory (file-name-directory file) t)
+  (make-process
+   :name "emacs-sherpa-rec"
+   :command (list emacs-sherpa-ffmpeg "-y"
+                  "-f" emacs-sherpa-ffmpeg-input-format
+                  "-i" emacs-sherpa-ffmpeg-input-device
+                  "-ar" "16000" "-ac" "1"
+                  "-loglevel" "quiet"
+                  file)
+   :connection-type 'pipe :noquery t
+   :buffer (get-buffer-create "*emacs-sherpa-rec*")
+   :sentinel sentinel))
+
 (defun emacs-sherpa--start-recording ()
   "Begin capturing the mic; transcribe into the current buffer when stopped."
   (let ((wav (setq emacs-sherpa--wav (make-temp-file "emacs-sherpa-" nil ".wav")))
         (buffer (current-buffer))
         (marker (point-marker)))
     (setq emacs-sherpa--rec-proc
-          (make-process
-           :name "emacs-sherpa-rec"
-           :command (list emacs-sherpa-ffmpeg "-y"
-                          "-f" emacs-sherpa-ffmpeg-input-format
-                          "-i" emacs-sherpa-ffmpeg-input-device
-                          "-ar" "16000" "-ac" "1"
-                          "-loglevel" "quiet"
-                          wav)
-           :connection-type 'pipe :noquery t
-           :buffer (get-buffer-create "*emacs-sherpa-rec*")
-           :sentinel (lambda (_p _e)
-                       (emacs-sherpa--submit wav buffer marker t)))))
+          (emacs-sherpa--ffmpeg-record
+           wav (lambda (_p _e) (emacs-sherpa--submit wav buffer marker t)))))
   (message "sherpa: recording… (run emacs-sherpa-dictate again to stop)"))
 
 ;;;###autoload
@@ -252,10 +264,39 @@ On first use, offers to install sherpa-onnx and start the daemon."
     (ignore-errors (delete-file emacs-sherpa--wav)))
   (message "sherpa: recording cancelled"))
 
+;; ---------------------------------------------------------------------------
+;; Plain recording (no transcription) -> save to Downloads
+;; ---------------------------------------------------------------------------
+;;;###autoload
+(defun emacs-sherpa-only-record (&optional file)
+  "Toggle a plain microphone recording (no transcription) saved to FILE.
+First call starts recording; second call stops and keeps the file.
+FILE defaults to a timestamped WAV under `emacs-sherpa-recordings-directory';
+with a prefix argument, prompt for it instead."
+  (interactive
+   (when current-prefix-arg (list (read-file-name "Save recording to: "))))
+  (if (process-live-p emacs-sherpa--rec-proc)
+      ;; second press: stop (SIGINT lets ffmpeg flush a valid file)
+      (progn (interrupt-process emacs-sherpa--rec-proc)
+             (setq emacs-sherpa--rec-proc nil))
+    ;; first press: start recording to the chosen file
+    (let ((dest (setq emacs-sherpa--wav
+                      (or file
+                          (expand-file-name
+                           (format-time-string "%Y%m%d-%H%M%S.wav")
+                           emacs-sherpa-recordings-directory)))))
+      (setq emacs-sherpa--rec-proc
+            (emacs-sherpa--ffmpeg-record
+             dest (lambda (_p _e)
+                    (message "sherpa: recording saved to %s" dest))))
+      (message "sherpa: recording to %s… (run emacs-sherpa-only-record again to stop)"
+               dest))))
+
 (defvar emacs-sherpa-map
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "C-c d") #'emacs-sherpa-dictate)
     (define-key m (kbd "C-c D") #'emacs-sherpa-cancel)
+    (define-key m (kbd "C-c r") #'emacs-sherpa-only-record)
     m)
   "Suggested keymap; not bound by default.")
 

@@ -25,6 +25,11 @@ On first use =emacs-sherpa-dictate= offers to install sherpa-onnx (via
 =make install=) and to start the daemon, so you can drive everything
 from Emacs. Only the =sherpa-onnx= Python package is required.
 
+To just capture audio without transcribing, =emacs-sherpa-only-record=
+toggles a recording and saves it to =emacs-sherpa-recordings-directory=
+(=~/Downloads= by default) under a timestamped name like
+=20260618-163210.wav=; a prefix argument prompts for the path.
+
 * Requirements
 
 - [[https://docs.astral.sh/uv/][uv]], =ffmpeg=, ~800 MB disk for the model + VAD
@@ -51,6 +56,7 @@ make test         # transcribe a bundled test wav
 | =emacs-sherpa-stop-daemon=   | Shut the daemon down                   |
 | =emacs-sherpa-dictate=       | Toggle record mic / stop + insert text |
 | =emacs-sherpa-dictate-file=  | Transcribe an existing WAV at point    |
+| =emacs-sherpa-only-record=   | Toggle record mic -> save WAV (no ASR) |
 | =emacs-sherpa-cancel=        | Cancel an in-progress recording        |
 | =emacs-sherpa-reset-python=  | Re-detect the Python interpreter       |
 
@@ -59,8 +65,9 @@ make test         # transcribe a bundled test wav
 | Variable                           | Default   | Description             |
 |------------------------------------+-----------+-------------------------|
 | =emacs-sherpa-python=              | auto      | Python with sherpa-onnx |
-| =emacs-sherpa-ffmpeg-input-format= | =pulse=   | ffmpeg input format     |
-| =emacs-sherpa-ffmpeg-input-device= | =default= | ffmpeg input device     |
+| =emacs-sherpa-ffmpeg-input-format= | =pulse=     | ffmpeg input format   |
+| =emacs-sherpa-ffmpeg-input-device= | =default=   | ffmpeg input device   |
+| =emacs-sherpa-recordings-directory= | =~/Downloads= | only-record save dir |
 
 * CLI
 
