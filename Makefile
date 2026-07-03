@@ -1,29 +1,28 @@
-# emacs-sherpa-onnx — sherpa-onnx ASR for Emacs (FireRedASR2-CTC + VAD + punctuation)
+# emacs-sherpa-onnx — streaming ASR for Emacs (sherpa-onnx ONNX, CPU-only)
 #
-#   make install     # venv + sherpa-onnx + download model, VAD & punctuation
-#   make test        # transcribe a bundled test wav
-#   make clean       # remove the downloaded models
-#   make uninstall   # remove the venv too
+#   make install      # venv + download streaming model (~120 MB)
+#   make test-stream  # test streaming with a test wav
+#   make clean        # remove models
+#   make uninstall    # remove venv + models
 
 VENV      := .venv
 PYTHON    := $(VENV)/bin/python3
 MODEL_DIR := models
-MODEL     := sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25
-PUNCT     := sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8
-REL       := https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models
-PUNCT_REL := https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models
-MODEL_URL := $(REL)/$(MODEL).tar.bz2
-VAD_URL   := $(REL)/silero_vad.onnx
-PUNCT_URL := $(PUNCT_REL)/$(PUNCT).tar.bz2
 
-# axel (multi-connection) is faster for the ~520 MB model; fall back to curl.
+# Streaming Zipformer2-CTC (ONNX, int8, Chinese, ~122 MB).
+# For the larger/more-accurate build, add `xlarge-` before `int8`.
+STREAM_MODEL := sherpa-onnx-streaming-zipformer-ctc-zh-int8-2025-06-30
+STREAM_URL   := https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$(STREAM_MODEL).tar.bz2
+STREAM_FILE  := model.int8.onnx
+
 DL := $(shell command -v axel >/dev/null 2>&1 && echo "axel -n 16 -o" || echo "curl -SL -C - -o")
 
-.PHONY: all install venv model vad punct test clean uninstall
+.PHONY: all install venv stream-model test-stream clean uninstall
 
 all: install
 
-install: venv model vad punct
+install: venv stream-model
+	@echo ""
 	@echo "Done. Emacs config:"
 	@echo "  (add-to-list 'load-path \"$(CURDIR)\")"
 	@echo "  (require 'emacs-sherpa)"
@@ -34,24 +33,14 @@ venv:
 	uv venv $(VENV)
 	uv pip install --python $(PYTHON) sherpa-onnx
 
-model: $(MODEL_DIR)/$(MODEL)/model.int8.onnx
-vad:   $(MODEL_DIR)/silero_vad.onnx
-punct: $(MODEL_DIR)/$(PUNCT)/model.int8.onnx
+stream-model: $(MODEL_DIR)/$(STREAM_MODEL)/$(STREAM_FILE)
 
-$(MODEL_DIR)/$(MODEL)/model.int8.onnx:
+$(MODEL_DIR)/$(STREAM_MODEL)/$(STREAM_FILE):
 	mkdir -p $(MODEL_DIR)
-	cd $(MODEL_DIR) && $(DL) m.tar.bz2 "$(MODEL_URL)" && tar xjf m.tar.bz2 && rm m.tar.bz2
+	cd $(MODEL_DIR) && $(DL) stream.tar.bz2 "$(STREAM_URL)" && tar xjf stream.tar.bz2 && rm stream.tar.bz2
 
-$(MODEL_DIR)/silero_vad.onnx:
-	mkdir -p $(MODEL_DIR)
-	cd $(MODEL_DIR) && $(DL) silero_vad.onnx "$(VAD_URL)"
-
-$(MODEL_DIR)/$(PUNCT)/model.int8.onnx:
-	mkdir -p $(MODEL_DIR)
-	cd $(MODEL_DIR) && $(DL) p.tar.bz2 "$(PUNCT_URL)" && tar xjf p.tar.bz2 && rm p.tar.bz2
-
-test: model vad
-	$(PYTHON) ./asr-sherpa $(MODEL_DIR)/$(MODEL)/test_wavs/0.wav
+test-stream: stream-model
+	$(PYTHON) ./asr-sherpa-stream --wav $(MODEL_DIR)/$(STREAM_MODEL)/test_wavs/0.wav
 
 clean:
 	rm -rf $(MODEL_DIR)

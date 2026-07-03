@@ -1,83 +1,112 @@
-;;; emacs-sherpa.el --- Dictate text via a resident sherpa-onnx ASR daemon -*- lexical-binding: t; -*-
+;;; emacs-sherpa.el --- Dictate text via sherpa-onnx streaming ASR -*- lexical-binding: t; -*-
 
-;; A thin Emacs front-end over the repo's `asr-sherpa' script.
-;; The script runs as a resident daemon (`--serve'): the model is loaded
-;; once, then each recording is transcribed quickly with no reload cost.
+;; Streaming dictation with sherpa-onnx Zipformer2-CTC (ONNX, CPU-only).
+;; Real-time output: text appears as a grey overlay while you speak,
+;; and is committed to the buffer at each pause.  Raw text (no
+;; punctuation) is inserted; run your own LLM command afterwards to
+;; add punctuation, fix homophones, and polish.
 ;;
-;; Three commands:
-;;   emacs-sherpa-start-daemon  -- launch the daemon (loads the model once)
-;;   emacs-sherpa-stop-daemon   -- shut the daemon down
-;;   emacs-sherpa-dictate       -- record the mic, transcribe, insert text
+;; Commands:
+;;   emacs-sherpa-dictate       -- toggle streaming dictation (mic -> text)
+;;   emacs-sherpa-dictate-file  -- transcribe an existing WAV file
+;;   emacs-sherpa-only-record   -- record mic -> save WAV (no ASR)
+;;   emacs-sherpa-cancel        -- cancel recording, discard partial text
+;;   emacs-sherpa-install       -- download streaming model (~120 MB)
 
 ;;; Usage:
-;;   (require 'emacs-sherpa)        ;; after adding this dir to load-path
+;;   (require 'emacs-sherpa)
 ;;   (global-set-key (kbd "C-c d") #'emacs-sherpa-dictate)
-;;   ;; emacs-sherpa-dictate auto-starts the daemon on first use.
 
 ;;; Code:
 
-(defgroup emacs-sherpa nil "sherpa-onnx ASR for Emacs." :group 'multimedia)
+(defgroup emacs-sherpa nil "sherpa-onnx streaming ASR for Emacs." :group 'multimedia)
 
 (defcustom emacs-sherpa-python nil
-  "Python interpreter that has sherpa-onnx installed.
+  "Python interpreter with sherpa-onnx installed in its venv.
 When nil, auto-detect from `emacs-sherpa-python-candidates'."
   :type '(choice (const :tag "Auto-detect" nil) (string :tag "Path"))
   :group 'emacs-sherpa)
 
 (defcustom emacs-sherpa-python-candidates
   '("python3" "python"
-    "~/Downloads/emacs-sherpa-onnx/.venv/bin/python3"
+    "~/.emacs.d/lib/emacs-sherpa-onnx/.venv/bin/python3"
     "~/.venv/sherpa/bin/python3")
-  "Python interpreters to probe when `emacs-sherpa-python' is nil.
-The first that can import sherpa_onnx wins."
+  "Python interpreters to probe when `emacs-sherpa-python' is nil."
   :type '(repeat string) :group 'emacs-sherpa)
 
 (defvar emacs-sherpa--python-cache nil)
 
 (defun emacs-sherpa--has-module-p (py)
-  "Return non-nil if interpreter PY can import sherpa_onnx."
   (let ((bin (executable-find (expand-file-name py))))
     (and bin (eq 0 (call-process bin nil nil nil "-c" "import sherpa_onnx")))))
 
 (defun emacs-sherpa--python ()
-  "Resolve the python interpreter to use."
   (cond
    (emacs-sherpa-python (expand-file-name emacs-sherpa-python))
    (emacs-sherpa--python-cache emacs-sherpa--python-cache)
    (t (setq emacs-sherpa--python-cache
-            (or (seq-find #'emacs-sherpa--has-module-p
-                          emacs-sherpa-python-candidates)
+            (or (seq-find #'emacs-sherpa--has-module-p emacs-sherpa-python-candidates)
                 (or (executable-find "python3") "python3"))))))
 
 (defun emacs-sherpa-reset-python ()
-  "Forget the auto-detected interpreter (re-detect on next use)."
+  "Forget the auto-detected interpreter."
   (interactive)
   (setq emacs-sherpa--python-cache nil)
   (message "sherpa python: %s" (emacs-sherpa--python)))
 
 ;; ---------------------------------------------------------------------------
-;; Installation (sherpa-onnx package + model)
+;; Paths
 ;; ---------------------------------------------------------------------------
 (defcustom emacs-sherpa-directory
   (file-name-directory (or load-file-name buffer-file-name ""))
-  "Repository directory (holds the Makefile, asr-sherpa script and models/)."
+  "Repository directory (holds Makefile, asr-sherpa-stream, models/)."
   :type 'string :group 'emacs-sherpa)
 
+(defcustom emacs-sherpa-stream-script
+  (expand-file-name "asr-sherpa-stream" emacs-sherpa-directory)
+  "Path to the streaming ASR script."
+  :type 'string :group 'emacs-sherpa)
+
+(defcustom emacs-sherpa-ffmpeg (or (executable-find "ffmpeg") "ffmpeg")
+  "Path to ffmpeg."
+  :type 'string :group 'emacs-sherpa)
+
+(defcustom emacs-sherpa-ffmpeg-input-format "pulse"
+  "ffmpeg input format (e.g. \"pulse\", \"alsa\")."
+  :type 'string :group 'emacs-sherpa)
+
+(defcustom emacs-sherpa-ffmpeg-input-device "default"
+  "ffmpeg input device."
+  :type 'string :group 'emacs-sherpa)
+
+(defcustom emacs-sherpa-recordings-directory
+  (or (getenv "XDG_DOWNLOAD_DIR") (expand-file-name "Downloads" "~"))
+  "Directory where `emacs-sherpa-only-record' saves WAV files."
+  :type 'directory :group 'emacs-sherpa)
+
+;; ---------------------------------------------------------------------------
+;; Installation check
+;; ---------------------------------------------------------------------------
+(defun emacs-sherpa--model-present-p ()
+  "Return non-nil if a supported streaming model exists on disk.
+Matches the auto-detection logic in `asr-sherpa-stream': either a
+single-file zipformer2-ctc model, or a paraformer encoder+decoder."
+  (let ((models (expand-file-name "models" emacs-sherpa-directory)))
+    (or (car (file-expand-wildcards
+              (expand-file-name "*streaming-zipformer*ctc*/model.int8.onnx" models)))
+        (car (file-expand-wildcards
+              (expand-file-name "*streaming-paraformer*/encoder.int8.onnx" models))))))
+
 (defun emacs-sherpa--installed-p ()
-  "Return non-nil if sherpa-onnx, the model and the VAD are all present."
+  "Return non-nil if sherpa-onnx is importable and a streaming model is present."
   (and (emacs-sherpa--has-module-p (emacs-sherpa--python))
-       (file-expand-wildcards
-        (expand-file-name "models/*fire-red-asr2-ctc*/model.int8.onnx"
-                          emacs-sherpa-directory))
-       (file-exists-p
-        (expand-file-name "models/silero_vad.onnx" emacs-sherpa-directory))))
+       (emacs-sherpa--model-present-p)))
 
 (defun emacs-sherpa-install (&optional callback)
-  "Run `make install' in `emacs-sherpa-directory' (venv + package + model).
-Call CALLBACK with no args once installation succeeds."
+  "Download streaming ONNX models via `make install'."
   (interactive)
   (let ((default-directory emacs-sherpa-directory))
-    (message "sherpa: installing (make install)… see *emacs-sherpa-install*")
+    (message "sherpa: downloading models… see *emacs-sherpa-install*")
     (make-process
      :name "emacs-sherpa-install"
      :command (list "make" "install")
@@ -88,209 +117,215 @@ Call CALLBACK with no args once installation succeeds."
        (when (memq (process-status proc) '(exit signal))
          (setq emacs-sherpa--python-cache nil)
          (if (eq 0 (process-exit-status proc))
-             (progn (message "sherpa: install finished")
+             (progn (message "sherpa: models installed")
                     (when callback (funcall callback)))
            (message "sherpa: install failed (see *emacs-sherpa-install*)")
            (display-buffer "*emacs-sherpa-install*")))))))
 
-(defcustom emacs-sherpa-script
-  (expand-file-name "asr-sherpa" emacs-sherpa-directory)
-  "Path to the asr-sherpa script."
-  :type 'string :group 'emacs-sherpa)
-
-(defcustom emacs-sherpa-ffmpeg (or (executable-find "ffmpeg") "ffmpeg")
-  "Path to ffmpeg, used to record the microphone."
-  :type 'string :group 'emacs-sherpa)
-
-(defcustom emacs-sherpa-ffmpeg-input-format "pulse"
-  "ffmpeg input format (e.g. \"pulse\", \"alsa\")."
-  :type 'string :group 'emacs-sherpa)
-
-(defcustom emacs-sherpa-ffmpeg-input-device "default"
-  "ffmpeg input device for `emacs-sherpa-ffmpeg-input-format'."
-  :type 'string :group 'emacs-sherpa)
-
-(defcustom emacs-sherpa-recordings-directory
-  (or (getenv "XDG_DOWNLOAD_DIR")
-      (expand-file-name "Downloads" "~"))
-  "Directory where `emacs-sherpa-only-record' saves timestamped WAV files."
-  :type 'directory :group 'emacs-sherpa)
-
-;; ---------------------------------------------------------------------------
-;; Resident daemon
-;; ---------------------------------------------------------------------------
-(defvar emacs-sherpa--daemon nil "The resident asr-sherpa --serve process.")
-(defvar emacs-sherpa--pending nil
-  "FIFO queue of (BUFFER MARKER TMP-WAV) jobs awaiting a daemon reply.
-TMP-WAV, when non-nil, is a temp file deleted once the reply arrives.")
-
-(defun emacs-sherpa--daemon-live-p ()
-  (process-live-p emacs-sherpa--daemon))
-
-(defun emacs-sherpa--filter (_proc string)
-  "Handle daemon output: a READY banner, then one text line per queued job."
-  (dolist (line (split-string string "\n" t))
-    (if (string= line "READY")
-        (message "sherpa: daemon ready")
-      (pcase-let ((`(,buf ,marker ,tmp) (pop emacs-sherpa--pending))
-                  (text (string-trim line)))
-        (when tmp (ignore-errors (delete-file tmp)))
-        (when buf
-          (when (and (not (string-prefix-p "[error]" text))
-                     (> (length text) 0) (buffer-live-p buf))
-            (with-current-buffer buf
-              (save-excursion (goto-char marker) (insert text))))
-          (message "sherpa: %s" text))))))
-
-(defun emacs-sherpa--sentinel (_proc _event)
-  (unless (emacs-sherpa--daemon-live-p)
-    (setq emacs-sherpa--pending nil)))
-
-;;;###autoload
-(defun emacs-sherpa-start-daemon ()
-  "Start the resident ASR daemon (loads the model once; takes a few seconds)."
-  (interactive)
-  (if (emacs-sherpa--daemon-live-p)
-      (message "sherpa: daemon already running")
-    (setq emacs-sherpa--pending nil
-          emacs-sherpa--daemon
-          (make-process
-           :name "emacs-sherpa-daemon"
-           :command (list (emacs-sherpa--python)
-                          (expand-file-name emacs-sherpa-script) "--serve")
-           :connection-type 'pipe :noquery t
-           :buffer (get-buffer-create "*emacs-sherpa-daemon*")
-           :filter #'emacs-sherpa--filter
-           :sentinel #'emacs-sherpa--sentinel))
-    (message "sherpa: starting daemon (loading model)…")))
-
 (defun emacs-sherpa--ensure-ready (then)
-  "Make sure things are usable, then call THEN.
-If sherpa-onnx is not installed, ask to run `make install' (THEN runs after).
-If the daemon is not running, ask to start it."
+  "Ensure models are available, then call THEN."
   (cond
-   ((not (emacs-sherpa--installed-p))
-    (when (y-or-n-p "sherpa-onnx not installed.  Run `make install' now? ")
-      (emacs-sherpa-install (lambda () (emacs-sherpa-start-daemon) (funcall then)))))
-   ((emacs-sherpa--daemon-live-p) (funcall then))
-   ((y-or-n-p "sherpa daemon not running.  Start it now? ")
-    (emacs-sherpa-start-daemon)
-    (funcall then))))
-
-;;;###autoload
-(defun emacs-sherpa-stop-daemon ()
-  "Stop the resident ASR daemon."
-  (interactive)
-  (when (emacs-sherpa--daemon-live-p)
-    (ignore-errors
-      (process-send-string emacs-sherpa--daemon "quit\n")))
-  (when (emacs-sherpa--daemon-live-p)
-    (delete-process emacs-sherpa--daemon))
-  (setq emacs-sherpa--daemon nil
-        emacs-sherpa--pending nil)
-  (message "sherpa: daemon stopped"))
+   ((emacs-sherpa--installed-p) (funcall then))
+   ((y-or-n-p "Streaming model not installed. Download now? (~120 MB) ")
+    (emacs-sherpa-install then))
+   (t (message "sherpa: models missing.  Run M-x emacs-sherpa-install"))))
 
 ;; ---------------------------------------------------------------------------
-;; Recording
+;; Streaming processes (ffmpeg -> pipe raw PCM -> asr-sherpa-stream -> JSON)
 ;; ---------------------------------------------------------------------------
-(defvar emacs-sherpa--rec-proc nil "Active ffmpeg recording process.")
-(defvar emacs-sherpa--wav nil "Temp wav file of the in-progress recording.")
+(defvar emacs-sherpa--rec-proc nil "ffmpeg recording process.")
+(defvar emacs-sherpa--asr-proc nil "asr-sherpa-stream process.")
+(defvar emacs-sherpa--overlay nil "Overlay showing partial streaming text.")
+(defvar emacs-sherpa--marker nil "Marker where final text is inserted.")
+(defvar emacs-sherpa--buffer nil "Buffer where dictation is active.")
+(defvar emacs-sherpa--expect-ready nil
+  "Non-nil while waiting for the READY signal from the ASR process.")
+(defvar emacs-sherpa--line-buffer ""
+  "Accumulates partial lines from the ASR process (line buffering).")
 
-(defun emacs-sherpa--submit (wav buffer marker tmp)
-  "Send WAV to the daemon; insert the reply at MARKER in BUFFER.
-TMP non-nil marks WAV as a temp file to delete once transcribed."
-  (setq emacs-sherpa--pending
-        (append emacs-sherpa--pending (list (list buffer marker tmp))))
-  (message "sherpa: transcribing…")
-  (process-send-string emacs-sherpa--daemon (concat wav "\n")))
+(defun emacs-sherpa--stream-filter (proc chunk)
+  "Handle output from asr-sherpa-stream, buffering partial lines.
+CHUNK may contain incomplete lines; only complete lines are parsed."
+  (let ((buf emacs-sherpa--buffer))
+    (unless (and buf (buffer-live-p buf))
+      (setq buf (process-buffer proc)))
+    ;; Accumulate and split on newlines; keep the trailing partial line.
+    (setq emacs-sherpa--line-buffer (concat emacs-sherpa--line-buffer chunk))
+    (let ((lines (split-string emacs-sherpa--line-buffer "\n")))
+      ;; Last element is the incomplete remainder (or "").
+      (setq emacs-sherpa--line-buffer (car (last lines)))
+      (dolist (l (butlast lines))
+       (when (> (length (string-trim l)) 0)
+        (condition-case err
+            (let-alist (json-parse-string l :object-type 'alist)
+            (cond
+             ((equal .type "ready")
+              (setq emacs-sherpa--expect-ready nil)
+              (message "sherpa: ready — start speaking"))
+             ((equal .type "status")
+              (message "sherpa: %s" .message))
+             ((equal .type "partial")
+              (when (and buf (buffer-live-p buf))
+                (with-current-buffer buf
+                  (unless (and emacs-sherpa--overlay
+                               (overlay-buffer emacs-sherpa--overlay))
+                    (setq emacs-sherpa--overlay
+                          (make-overlay emacs-sherpa--marker emacs-sherpa--marker)))
+                  (overlay-put emacs-sherpa--overlay 'after-string
+                               (propertize .text 'face 'font-lock-comment-face)))))
+             ((equal .type "final")
+              (when (and buf (buffer-live-p buf))
+                (with-current-buffer buf
+                  (when emacs-sherpa--overlay
+                    (delete-overlay emacs-sherpa--overlay)
+                    (setq emacs-sherpa--overlay nil))
+                  (save-excursion
+                    (goto-char emacs-sherpa--marker)
+                    (insert .text " "))))
+              (message "sherpa: %s" .text))
+             ((equal .type "error")
+              (message "sherpa error: %s" .message))
+             ((equal .type "eof")
+              (emacs-sherpa--cleanup 'kill-asr)
+              (message "sherpa: done"))))
+          (error
+           (message "sherpa: bad line: %s (%s)" l err))))))))
 
-(defun emacs-sherpa--ffmpeg-record (file sentinel)
-  "Start ffmpeg capturing the mic into FILE; call SENTINEL when it ends.
-Return the process."
-  (make-directory (file-name-directory file) t)
-  (make-process
-   :name "emacs-sherpa-rec"
-   :command (list emacs-sherpa-ffmpeg "-y"
-                  "-f" emacs-sherpa-ffmpeg-input-format
-                  "-i" emacs-sherpa-ffmpeg-input-device
-                  "-ar" "16000" "-ac" "1"
-                  "-loglevel" "quiet"
-                  file)
-   :connection-type 'pipe :noquery t
-   :buffer (get-buffer-create "*emacs-sherpa-rec*")
-   :sentinel sentinel))
+(defun emacs-sherpa--cleanup (&optional kill-asr)
+  "Stop recording; if KILL-ASR, force-kill the ASR process too."
+  (when (process-live-p emacs-sherpa--rec-proc)
+    (interrupt-process emacs-sherpa--rec-proc)
+    (setq emacs-sherpa--rec-proc nil))
+  (when kill-asr
+    (when (process-live-p emacs-sherpa--asr-proc)
+      (delete-process emacs-sherpa--asr-proc)
+      (setq emacs-sherpa--asr-proc nil))
+    (when (and emacs-sherpa--overlay (overlay-buffer emacs-sherpa--overlay))
+      (delete-overlay emacs-sherpa--overlay))
+    (setq emacs-sherpa--overlay nil
+          emacs-sherpa--marker nil
+          emacs-sherpa--buffer nil
+          emacs-sherpa--expect-ready nil)))
+
+(defun emacs-sherpa--launch-asr (&optional wav-file)
+  "Start asr-sherpa-stream process.
+If WAV-FILE is non-nil, pass it as an argument (file transcription);
+otherwise reads PCM from stdin (mic recording)."
+  (setq emacs-sherpa--expect-ready t
+        emacs-sherpa--line-buffer ""
+        emacs-sherpa--buffer (current-buffer)
+        ;; insertion-type t: marker advances past inserted final text so
+        ;; successive utterances append in order (not reversed).
+        emacs-sherpa--marker (copy-marker (point) t))
+  (let ((cmd (list (emacs-sherpa--python)
+                   (expand-file-name emacs-sherpa-stream-script))))
+    (when wav-file
+      (setq cmd (append cmd (list "--wav" (expand-file-name wav-file)))))
+    (setq emacs-sherpa--asr-proc
+          (make-process
+           :name "emacs-sherpa-asr"
+           :command cmd
+           :connection-type 'pipe
+           ;; decode stdout (JSON) as UTF-8; encode stdin (raw PCM) as
+           ;; binary so audio bytes are not mangled by EOL/charset conversion.
+           :coding '(utf-8 . binary)
+           :noquery t
+           :buffer (get-buffer-create "*emacs-sherpa-asr*")
+           :filter #'emacs-sherpa--stream-filter
+           :sentinel (lambda (p _e)
+                       (unless (process-live-p p)
+                         (emacs-sherpa--cleanup 'kill-asr)))))))
 
 (defun emacs-sherpa--start-recording ()
-  "Begin capturing the mic; transcribe into the current buffer when stopped."
-  (let ((wav (setq emacs-sherpa--wav (make-temp-file "emacs-sherpa-" nil ".wav")))
-        (buffer (current-buffer))
-        (marker (point-marker)))
-    (setq emacs-sherpa--rec-proc
-          (emacs-sherpa--ffmpeg-record
-           wav (lambda (_p _e) (emacs-sherpa--submit wav buffer marker t)))))
-  (message "sherpa: recording… (run emacs-sherpa-dictate again to stop)"))
+  "Launch ffmpeg recording the mic, piping raw PCM to the ASR process."
+  (setq emacs-sherpa--rec-proc
+        (make-process
+         :name "emacs-sherpa-rec"
+         :command (list emacs-sherpa-ffmpeg "-y"
+                        "-f" emacs-sherpa-ffmpeg-input-format
+                        "-i" emacs-sherpa-ffmpeg-input-device
+                        "-ar" "16000" "-ac" "1"
+                        "-f" "s16le"
+                        "-loglevel" "quiet"
+                        "pipe:1")
+         :connection-type 'pipe
+         ;; ffmpeg writes raw PCM to stdout; read it as binary.
+         :coding 'binary
+         :noquery t
+         :buffer (get-buffer-create "*emacs-sherpa-rec*")
+         :filter (lambda (_p data)
+                   (when (process-live-p emacs-sherpa--asr-proc)
+                     (process-send-string emacs-sherpa--asr-proc data)))
+         :sentinel (lambda (_p _e)
+                     (when (process-live-p emacs-sherpa--asr-proc)
+                       (process-send-eof emacs-sherpa--asr-proc)))))
+  (message "sherpa: recording… (press again to stop)"))
 
 ;;;###autoload
 (defun emacs-sherpa-dictate ()
-  "Toggle recording: start recording the mic, or stop and transcribe.
-On first use, offers to install sherpa-onnx and start the daemon."
+  "Toggle streaming dictation: start/stop microphone recording.
+Real-time raw text appears as you speak and is committed at each pause.
+Run your own LLM command afterwards to add punctuation and polish."
   (interactive)
   (if (process-live-p emacs-sherpa--rec-proc)
-      ;; second press: stop recording -> transcribe (SIGINT lets ffmpeg flush)
-      (progn (interrupt-process emacs-sherpa--rec-proc)
-             (setq emacs-sherpa--rec-proc nil))
-    ;; first press: ensure things are ready, then start recording
-    (emacs-sherpa--ensure-ready #'emacs-sherpa--start-recording)))
+      ;; stop recording (ASR finishes processing buffered audio)
+      (emacs-sherpa--cleanup)
+    ;; start recording: ensure model is installed FIRST, then launch
+    ;; the ASR process and start capturing audio.
+    (emacs-sherpa--cleanup)           ; ensure clean state
+    (emacs-sherpa--ensure-ready
+     (lambda ()
+       (emacs-sherpa--launch-asr)
+       (emacs-sherpa--start-recording)))))
 
 ;;;###autoload
 (defun emacs-sherpa-dictate-file (file)
-  "Transcribe an existing WAV FILE via the daemon, insert text at point.
-On first use, offers to install sherpa-onnx and start the daemon."
+  "Transcribe an existing WAV FILE via the streaming pipeline.
+Raw text is inserted at point."
   (interactive "fWAV file: ")
-  (emacs-sherpa--ensure-ready
-   (lambda ()
-     (emacs-sherpa--submit (expand-file-name file)
-                           (current-buffer) (point-marker) nil))))
+  (emacs-sherpa--cleanup 'kill-asr)
+  (emacs-sherpa--launch-asr file)
+  (message "sherpa: transcribing %s…" (file-name-nondirectory file)))
 
 ;;;###autoload
 (defun emacs-sherpa-cancel ()
-  "Cancel an in-progress recording without transcribing."
+  "Cancel recording or transcription, discarding partial text."
   (interactive)
-  (when (process-live-p emacs-sherpa--rec-proc)
-    (set-process-sentinel emacs-sherpa--rec-proc #'ignore)
-    (kill-process emacs-sherpa--rec-proc))
-  (setq emacs-sherpa--rec-proc nil)
-  (when (and emacs-sherpa--wav (file-exists-p emacs-sherpa--wav))
-    (ignore-errors (delete-file emacs-sherpa--wav)))
-  (message "sherpa: recording cancelled"))
+  (when emacs-sherpa--overlay
+    (when (overlay-buffer emacs-sherpa--overlay)
+      (delete-overlay emacs-sherpa--overlay))
+    (setq emacs-sherpa--overlay nil))
+  (emacs-sherpa--cleanup 'kill-asr)
+  (message "sherpa: cancelled"))
 
 ;; ---------------------------------------------------------------------------
-;; Plain recording (no transcription) -> save to Downloads
+;; Plain recording (no transcription)
 ;; ---------------------------------------------------------------------------
 ;;;###autoload
 (defun emacs-sherpa-only-record (&optional file)
-  "Toggle a plain microphone recording (no transcription) saved to FILE.
-First call starts recording; second call stops and keeps the file.
-FILE defaults to a timestamped WAV under `emacs-sherpa-recordings-directory';
-with a prefix argument, prompt for it instead."
+  "Toggle plain microphone recording (no transcription), saved to FILE."
   (interactive
    (when current-prefix-arg (list (read-file-name "Save recording to: "))))
   (if (process-live-p emacs-sherpa--rec-proc)
-      ;; second press: stop (SIGINT lets ffmpeg flush a valid file)
       (progn (interrupt-process emacs-sherpa--rec-proc)
              (setq emacs-sherpa--rec-proc nil))
-    ;; first press: start recording to the chosen file
-    (let ((dest (setq emacs-sherpa--wav
-                      (or file
-                          (expand-file-name
-                           (format-time-string "%Y%m%d-%H%M%S.wav")
-                           emacs-sherpa-recordings-directory)))))
+    (let ((dest (or file
+                    (expand-file-name
+                     (format-time-string "%Y%m%d-%H%M%S.wav")
+                     emacs-sherpa-recordings-directory))))
       (setq emacs-sherpa--rec-proc
-            (emacs-sherpa--ffmpeg-record
-             dest (lambda (_p _e)
-                    (message "sherpa: recording saved to %s" dest))))
-      (message "sherpa: recording to %s… (run emacs-sherpa-only-record again to stop)"
-               dest))))
+            (make-process
+             :name "emacs-sherpa-rec"
+             :command (list emacs-sherpa-ffmpeg "-y"
+                            "-f" emacs-sherpa-ffmpeg-input-format
+                            "-i" emacs-sherpa-ffmpeg-input-device
+                            "-ar" "16000" "-ac" "1"
+                            "-loglevel" "quiet" dest)
+             :connection-type 'pipe :noquery t
+             :buffer (get-buffer-create "*emacs-sherpa-rec*")
+             :sentinel (lambda (_p _e)
+                         (message "sherpa: recording saved to %s" dest))))
+      (message "sherpa: recording to %s… (press again to stop)" dest))))
 
 ;;;###autoload
 (defvar emacs-sherpa-map)
@@ -300,9 +335,6 @@ with a prefix argument, prompt for it instead."
   (define-key m (kbd "d") #'emacs-sherpa-dictate)
   (define-key m (kbd "c") #'emacs-sherpa-cancel)
   (define-key m (kbd "r") #'emacs-sherpa-only-record))
-;; `emacs-sherpa-map' is both a keymap and a prefix command, so binding a
-;; single key to it in a normal keymap enters it directly:
-;;   (define-key some-map (kbd "s") 'emacs-sherpa-map)  ; then d / c / r
 
 (provide 'emacs-sherpa)
 ;;; emacs-sherpa.el ends here

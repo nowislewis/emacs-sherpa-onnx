@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""asr-sherpa-stream: real-time streaming dictation via sherpa-onnx ONNX.
+
+Reads 16-bit PCM (16 kHz, mono) from stdin, transcribes chunk-by-chunk
+with a streaming Paraformer (ONNX, int8), and outputs raw text as it
+becomes available.  No punctuation or correction — leave that to an
+LLM post-pass on the Emacs side.
+
+No GPU/PyTorch required — pure ONNX Runtime on CPU.
+
+Usage:
+  ffmpeg ... -f s16le pipe:1 | asr-sherpa-stream          # mic streaming
+  asr-sherpa-stream --wav audio.wav                        # file transcription
+
+Output: one JSON line per event:
+  {"type":"ready"}
+  {"type":"partial","text":"今天天气"}
+  {"type":"final","text":"今天天气真不错"}    # endpoint (silence) triggered
+  {"type":"error","message":"..."}
+  {"type":"eof"}
+"""
+import argparse
+import array
+import glob
+import json
+import os
+import struct
+import sys
+import wave
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(HERE, "models")
+SAMPLE_RATE = 16000
+
+CHUNK_MS = 200
+CHUNK_SAMPLES = int(CHUNK_MS * SAMPLE_RATE / 1000)
+
+MIN_SILENCE_SEC = 1.5
+MIN_UTTERANCE_SEC = 0.5
+
+
+def emit(obj: dict) -> None:
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def pcm_to_float(raw: bytes) -> list[float]:
+    n = len(raw) // 2
+    return [s / 32768.0 for s in struct.unpack(f"{n}h", raw[: n * 2])]
+
+
+def find_model_dir(pattern: str) -> str | None:
+    hits = sorted(glob.glob(os.path.join(MODELS_DIR, pattern)))
+    hits = [d for d in hits if os.path.isdir(d)]
+    return hits[0] if hits else None
+
+
+def build_recognizer():
+    """Auto-detect and build a streaming recognizer.
+
+    Prefers a zipformer2-ctc model (single model.int8.onnx, newer/better
+    for Chinese); falls back to a streaming Paraformer (encoder+decoder).
+    """
+    import sherpa_onnx
+    nthreads = max(1, (os.cpu_count() or 2) - 1)
+
+    # 1) zipformer2-ctc (single-file, Chinese, 2025)
+    d = find_model_dir("*streaming-zipformer*ctc*")
+    if d:
+        model = os.path.join(d, "model.int8.onnx")
+        tokens = os.path.join(d, "tokens.txt")
+        if os.path.exists(model) and os.path.exists(tokens):
+            emit({"type": "status", "message": f"model: {os.path.basename(d)}"})
+            return sherpa_onnx.OnlineRecognizer.from_zipformer2_ctc(
+                tokens=tokens, model=model, num_threads=nthreads,
+            )
+
+    # 2) streaming Paraformer (encoder + decoder)
+    d = find_model_dir("*streaming-paraformer*")
+    if d:
+        encoder = os.path.join(d, "encoder.int8.onnx")
+        decoder = os.path.join(d, "decoder.int8.onnx")
+        tokens = os.path.join(d, "tokens.txt")
+        if all(os.path.exists(f) for f in (encoder, decoder, tokens)):
+            emit({"type": "status", "message": f"model: {os.path.basename(d)}"})
+            return sherpa_onnx.OnlineRecognizer.from_paraformer(
+                tokens=tokens, encoder=encoder, decoder=decoder,
+                num_threads=nthreads,
+            )
+
+    emit({"type": "error", "message": "No streaming model found. Run `make install`."})
+    sys.exit(1)
+
+
+def read_wav_file(path: str) -> list[float]:
+    wf = wave.open(path, "rb")
+    try:
+        sr = wf.getframerate()
+        ch = wf.getnchannels()
+        sw = wf.getsampwidth()
+        raw = wf.readframes(wf.getnframes())
+    finally:
+        wf.close()
+    a = array.array("h" if sw == 2 else "i")
+    a.frombytes(raw)
+    if ch > 1:
+        a = a[::ch]
+    samples = [s / 32768.0 for s in a]
+    if sr != SAMPLE_RATE:
+        ratio = SAMPLE_RATE / sr
+        n = int(len(samples) * ratio)
+        out = [0.0] * n
+        for i in range(n):
+            src = i / ratio
+            j = int(src)
+            frac = src - j
+            s0 = samples[j]
+            s1 = samples[j + 1] if j + 1 < len(samples) else s0
+            out[i] = s0 + (s1 - s0) * frac
+        samples = out
+    return samples
+
+
+def chunked(samples: list[float]):
+    for i in range(0, len(samples), CHUNK_SAMPLES):
+        chunk = samples[i : i + CHUNK_SAMPLES]
+        if len(chunk) < CHUNK_SAMPLES:
+            chunk.extend([0.0] * (CHUNK_SAMPLES - len(chunk)))
+        yield chunk
+
+
+def stream_from_stdin():
+    while True:
+        raw = sys.stdin.buffer.read(CHUNK_SAMPLES * 2)
+        if not raw:
+            return
+        chunk = pcm_to_float(raw)
+        if len(chunk) < CHUNK_SAMPLES:
+            chunk.extend([0.0] * (CHUNK_SAMPLES - len(chunk)))
+        yield chunk
+
+
+def run_streaming(rec, chunks_iter, enable_endpoint=True):
+    stream = rec.create_stream()
+    utt_text = ""
+    silence_chunks = 0
+    silence_threshold = int(MIN_SILENCE_SEC * 1000 / CHUNK_MS)
+    min_utt_chunks = int(MIN_UTTERANCE_SEC * 1000 / CHUNK_MS)
+
+    def flush():
+        nonlocal utt_text, silence_chunks
+        t = utt_text.strip()
+        if t and len(t) > 1:
+            emit({"type": "final", "text": t})
+        utt_text = ""
+        silence_chunks = 0
+
+    for chunk in chunks_iter:
+        stream.accept_waveform(SAMPLE_RATE, chunk)
+        while rec.is_ready(stream):
+            rec.decode_stream(stream)
+
+        text = rec.get_result(stream)
+        changed = text != utt_text
+        utt_text = text
+
+        if changed and text:
+            # Send the FULL current utterance text (overlay shows it whole).
+            emit({"type": "partial", "text": text})
+            silence_chunks = 0
+        else:
+            silence_chunks += 1
+
+        if enable_endpoint and silence_chunks >= silence_threshold:
+            flush()
+            stream = rec.create_stream()
+
+    # EOF padding
+    tail = [0.0] * int(0.5 * SAMPLE_RATE)
+    stream.accept_waveform(SAMPLE_RATE, tail)
+    stream.input_finished()
+    while rec.is_ready(stream):
+        rec.decode_stream(stream)
+    final_text = rec.get_result(stream)
+    if final_text != utt_text:
+        utt_text = final_text
+    if utt_text.strip():
+        emit({"type": "final", "text": utt_text.strip()})
+    emit({"type": "eof"})
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--wav", default=None, help="Transcribe a WAV file instead of stdin")
+    args = p.parse_args()
+
+    emit({"type": "status", "message": "loading streaming model…"})
+    rec = build_recognizer()
+    emit({"type": "ready"})
+
+    if args.wav:
+        samples = read_wav_file(args.wav)
+        run_streaming(rec, chunked(samples), enable_endpoint=False)
+    else:
+        ep = os.environ.get("ASR_NO_ENDPOINT", "") != "1"
+        run_streaming(rec, stream_from_stdin(), enable_endpoint=ep)
+
+
+if __name__ == "__main__":
+    main()

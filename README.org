@@ -1,107 +1,74 @@
 #+title: emacs-sherpa-onnx
 #+language: en
 
-Dictate text into Emacs with [[https://github.com/k2-fsa/sherpa-onnx][sherpa-onnx]] running [[https://github.com/FireRedTeam/FireRedASR2-AED][FireRedASR2]] (CTC,
-int8) — a high-accuracy ASR model for Chinese and English with 20+
-Chinese dialects (普通话、粤语、四川话、上海话、闽南语等). Runs on CPU,
-offline, no server. Short audio (≤30 s, i.e. ordinary dictation) is fed
-to the model whole — most reliable, never drops weak or short speech.
-Long audio is split into utterances with a VAD (silero) so recordings
-of any length work with bounded memory. A CT-Transformer model restores
-punctuation and breaks the result into one sentence per line. A
-self-contained Python script (=asr-sherpa=) plus a thin Emacs front-end
-(=emacs-sherpa.el=).
+Streaming dictation into Emacs with [[https://github.com/k2-fsa/sherpa-onnx][sherpa-onnx]] running a streaming
+Zipformer2-CTC (ONNX, int8) — Chinese + English ASR with real-time
+output.  Pure CPU, offline, no server, no GPU.
 
-A resident daemon loads the model once and stays in memory, so each
-transcription is fast:
+*How it works*
 
-#+begin_example
-  emacs-sherpa-start-daemon  ->  launch daemon, load model once
-  emacs-sherpa-dictate       ->  record mic -> insert text (press again to stop)
-  emacs-sherpa-stop-daemon   ->  shut the daemon down
-#+end_example
+The streaming model produces incremental text every ~200 ms while
+you speak; it appears in Emacs as a grey overlay and is committed to
+the buffer at each pause.  The inserted text is *raw* (no punctuation,
+no error correction) — run your own LLM command on the region
+afterwards to add punctuation, fix homophones, and polish.
 
-On first use =emacs-sherpa-dictate= offers to install sherpa-onnx (via
-=make install=) and to start the daemon, so you can drive everything
-from Emacs. Only the =sherpa-onnx= Python package is required.
+*Requirements*
 
-To just capture audio without transcribing, =emacs-sherpa-only-record=
-toggles a recording and saves it to =emacs-sherpa-recordings-directory=
-(=~/Downloads= by default) under a timestamped name like
-=20260618-163210.wav=; a prefix argument prompts for the path.
+- [[https://docs.astral.sh/uv/][uv]], =ffmpeg=, ~160 MB disk (model)
 
-* Requirements
-
-- [[https://docs.astral.sh/uv/][uv]], =ffmpeg=, ~800 MB disk for the model + VAD
-
-* Quick start
+*Quick start*
 
 #+begin_src shell
-make install      # venv + sherpa-onnx + download FireRedASR2-CTC + VAD (~520 MB)
-make test         # transcribe a bundled test wav
+make install      # venv + download streaming Zipformer2-CTC (~120 MB)
+make test-stream  # transcribe a bundled test wav
 #+end_src
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/Downloads/emacs-sherpa-onnx")
+(add-to-list 'load-path "~/.emacs.d/lib/emacs-sherpa-onnx")
 (require 'emacs-sherpa)
 (global-set-key (kbd "C-c d") #'emacs-sherpa-dictate)
-;; Or bind one key to the whole keymap (then press d / c / r):
-;;   (global-set-key (kbd "C-c s") 'emacs-sherpa-map)
 #+end_src
 
-=emacs-sherpa-map= binds =d= / =c= / =r= to dictate / cancel /
-only-record.  For a [[https://github.com/magit/transient][transient]] pop-up menu, wrap the commands in your
-own prefix (keeps this package transient-free):
+| Command                    | Description                                  |
+|----------------------------+----------------------------------------------|
+| =emacs-sherpa-dictate=       | Toggle streaming dictation (mic → text)     |
+| =emacs-sherpa-dictate-file=  | Transcribe an existing WAV file             |
+| =emacs-sherpa-cancel=        | Cancel, discard partial text                |
+| =emacs-sherpa-only-record=   | Record mic → save WAV (no ASR)             |
+| =emacs-sherpa-install=       | Download models                             |
+| =emacs-sherpa-map=           | Prefix keymap: d / c / r                   |
 
-#+begin_src emacs-lisp
-(transient-define-prefix sherpa-transient ()
-  "sherpa-onnx ASR."
-  [("d" "dictate"     emacs-sherpa-dictate)
-   ("c" "cancel"      emacs-sherpa-cancel)
-   ("r" "only-record" emacs-sherpa-only-record)])
-;; then reference `sherpa-transient' from your leader, e.g. ("w" "sherpa" sherpa-transient)
-#+end_src
+*Customization*
 
-* Commands
+| Variable                           | Default     |
+|------------------------------------+-------------|
+| =emacs-sherpa-ffmpeg-input-format=   | =pulse=       |
+| =emacs-sherpa-ffmpeg-input-device=   | =default=     |
+| =emacs-sherpa-recordings-directory=  | =~/Downloads= |
+| =emacs-sherpa-python=              | auto        |
 
-| Command                      | Description                            |
-|------------------------------+----------------------------------------|
-| =emacs-sherpa-install=       | Install sherpa-onnx + model (make)     |
-| =emacs-sherpa-start-daemon=  | Launch the daemon (loads model once)   |
-| =emacs-sherpa-stop-daemon=   | Shut the daemon down                   |
-| =emacs-sherpa-dictate=       | Toggle record mic / stop + insert text |
-| =emacs-sherpa-dictate-file=  | Transcribe an existing WAV at point    |
-| =emacs-sherpa-only-record=   | Toggle record mic -> save WAV (no ASR) |
-| =emacs-sherpa-cancel=        | Cancel an in-progress recording        |
-| =emacs-sherpa-map=           | Prefix keymap: d / c / r for the above |
-| =emacs-sherpa-reset-python=  | Re-detect the Python interpreter       |
-
-* Customization
-
-| Variable                           | Default   | Description             |
-|------------------------------------+-----------+-------------------------|
-| =emacs-sherpa-python=              | auto      | Python with sherpa-onnx |
-| =emacs-sherpa-ffmpeg-input-format= | =pulse=     | ffmpeg input format   |
-| =emacs-sherpa-ffmpeg-input-device= | =default=   | ffmpeg input device   |
-| =emacs-sherpa-recordings-directory= | =~/Downloads= | only-record save dir |
-
-* CLI
+*CLI*
 
 #+begin_src shell
-asr-sherpa audio.wav      # one-shot: print text
-asr-sherpa < audio.wav    # one-shot: read WAV from stdin
-asr-sherpa --serve        # daemon: one wav path per line -> one text line
+# Mic streaming (via ffmpeg pipe)
+ffmpeg -f pulse -i default -ar 16000 -ac 1 -f s16le pipe:1 | asr-sherpa-stream
+
+# File transcription
+asr-sherpa-stream --wav audio.wav
+
+# Environment
+ASR_NO_ENDPOINT=1   # disable endpoint detection (pipe mode)
 #+end_src
 
-The WAV must be 16-bit PCM; any sample rate / channel count is accepted
-(downmixed to mono, resampled to 16 kHz). The model and =silero_vad.onnx=
-live in =models/= next to the script, so the repo is self-contained.
+*Post-processing (optional)*
 
-The whole-vs-VAD cutoff defaults to 30 s; override with the
-=ASR_VAD_THRESHOLD_SEC= environment variable (set it huge to always
-transcribe whole, or 0 to always use the VAD).
+Inserted text is raw.  To clean it up, run any LLM command on the
+region — e.g. with gptel, ellama, or a shell filter.  Example prompt:
+"给下面的语音转写加上标点，修正明显的同音字错误，不要改变原意".
 
-Punctuation is optional: if the CT-Transformer model is present it is
-applied automatically (and the text is split one sentence per line);
-otherwise raw unpunctuated text is returned. In =--serve= mode the
-newlines are flattened to spaces so each reply stays on one line.
+*Model*
+
+| Model                  | Size   | Purpose             |
+|------------------------+--------+---------------------|
+| streaming Zipformer2-CTC | 122 MB | real-time zh+en ASR |
